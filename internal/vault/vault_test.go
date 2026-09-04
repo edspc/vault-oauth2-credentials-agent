@@ -435,6 +435,28 @@ func TestTokenValid(t *testing.T) {
 	}
 }
 
+func TestTokenExpiry(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	client := newTestClient(t, "https://vault.example.com",
+		AuthConfig{Method: MethodToken, Token: "s.token"})
+	client.now = func() time.Time { return now }
+
+	if got := client.TokenExpiry(); !got.IsZero() {
+		t.Errorf("TokenExpiry() = %s before login, want the zero time", got)
+	}
+
+	client.setAuth(&authInfo{Token: "s.token", Lease: time.Hour})
+	if want := now.Add(time.Hour); !client.TokenExpiry().Equal(want) {
+		t.Errorf("TokenExpiry() = %s, want %s", client.TokenExpiry(), want)
+	}
+
+	// A token without a lease never expires, so there is nothing to report.
+	client.setAuth(&authInfo{Token: "s.root", Lease: 0})
+	if got := client.TokenExpiry(); !got.IsZero() {
+		t.Errorf("TokenExpiry() = %s for a token without a lease, want the zero time", got)
+	}
+}
+
 func TestMaintainTokenStopsOnContextCancel(t *testing.T) {
 	client := newTestClient(t, "https://vault.example.com",
 		AuthConfig{Method: MethodToken, Token: "s.token"})

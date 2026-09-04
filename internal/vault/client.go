@@ -279,3 +279,14 @@ func (c *Client) TokenValid() bool {
 	}
 	return c.now().Before(c.issuedAt.Add(c.lease))
 }
+
+// TokenExpiry reports when the current client token expires. It returns the
+// zero time when no token is held or when the token has no lease.
+func (c *Client) TokenExpiry() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.token == "" || c.lease <= 0 {
+		return time.Time{}
+	}
+	return c.issuedAt.Add(c.lease)
+}
