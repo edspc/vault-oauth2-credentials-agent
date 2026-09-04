@@ -1,0 +1,81 @@
+# Example configuration for the OAuth2 credentials agent.
+#
+# Values written as ${VAR} are taken from the environment at startup; an unset
+# variable aborts the start instead of producing an empty credential.
+
+server:
+  listen: ":8080"
+  # Used to derive entries[].redirect_url when it is not set explicitly.
+  base_url: "https://oauth-agent.internal"
+  callback_path: "/callback"
+  read_header_timeout: 10s
+  shutdown_timeout: 15s
+
+vault:
+  address: "https://vault.internal:8200"
+  # Vault Enterprise namespace; leave empty for open source Vault.
+  namespace: ""
+  timeout: 10s
+  auth:
+    # One of: token, approle, kubernetes.
+    method: approle
+    # method: token
+    token: "${VAULT_TOKEN}"
+    approle:
+      mount: approle
+      role_id: "${VAULT_ROLE_ID}"
+      secret_id: "${VAULT_SECRET_ID}"
+    kubernetes:
+      mount: kubernetes
+      role: oauth2-agent
+      jwt_path: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+metrics:
+  # Prometheus exposition endpoint, served on the same listener as the rest of
+  # the API. Leave it out entirely to collect and expose nothing at all.
+  path: "/metrics"
+
+refresh:
+  # How often stored credentials are inspected.
+  interval: 1m
+  # Refresh once the access token expires sooner than this. Must be larger
+  # than the interval, otherwise a token can expire between two ticks.
+  before_expiry: 10m
+  # Upper bound of the retry delay after a failed refresh.
+  max_backoff: 30m
+
+entries:
+  - id: github-ci
+    auth_url: "https://github.com/login/oauth/authorize"
+    token_url: "https://github.com/login/oauth/access_token"
+    client_id: "Iv1.0123456789abcdef"
+    client_secret: "${GITHUB_CLIENT_SECRET}"
+    # Must match the callback URL registered with the provider.
+    redirect_url: "https://oauth-agent.internal/callback"
+    scopes:
+      - repo
+      - read:org
+    # PKCE (S256) is enabled by default; set to false only for providers that
+    # reject the extra parameters.
+    pkce: true
+    # How client credentials reach the token endpoint: auto, header or params.
+    auth_style: auto
+    vault:
+      mount: secret
+      path: oauth2/github/ci-bot
+
+  - id: google-reports
+    auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+    token_url: "https://oauth2.googleapis.com/token"
+    client_id: "${GOOGLE_CLIENT_ID}"
+    client_secret: "${GOOGLE_CLIENT_SECRET}"
+    redirect_url: "https://oauth-agent.internal/callback"
+    scopes:
+      - "https://www.googleapis.com/auth/analytics.readonly"
+    # Google only issues a refresh token when both parameters are present.
+    extra_auth_params:
+      access_type: offline
+      prompt: consent
+    vault:
+      mount: secret
+      path: oauth2/google/reports

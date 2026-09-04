@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Creating the release needs write access; nothing else here does.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # A tag should never publish something that does not pass CI.
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: go test ./... -race -count=1
+
+      # `make dist` cross-compiles every target and writes one SHA256SUMS
+      # covering them, so a download can be verified without trusting the
+      # release page. The flags live in the Makefile rather than here: running
+      # the same target locally is what keeps a published binary and one built
+      # by hand identical.
+      - name: Build
+        run: make dist VERSION="${{ github.ref_name }}"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --title "$VERSION" \
+            --generate-notes \
+            --verify-tag
