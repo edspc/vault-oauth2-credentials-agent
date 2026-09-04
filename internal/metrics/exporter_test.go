@@ -222,14 +222,51 @@ func TestProcessMetrics(t *testing.T) {
 			t.Errorf("missing %s", name)
 		}
 	}
-	var buildInfoFound bool
+	if key, ok := buildInfoSeries(series); !ok {
+		t.Errorf("missing %s", metricBuildInfo)
+	} else if !strings.Contains(key, `version="`+DefaultVersion+`"`) {
+		t.Errorf("%s carries no default version label: %s", metricBuildInfo, key)
+	}
+}
+
+// buildInfoSeries returns the full identity of the build info series.
+func buildInfoSeries(series map[string]string) (string, bool) {
 	for key := range series {
 		if strings.HasPrefix(key, metricBuildInfo+"{") {
-			buildInfoFound = true
+			return key, true
 		}
 	}
-	if !buildInfoFound {
-		t.Errorf("missing %s", metricBuildInfo)
+	return "", false
+}
+
+func TestBuildInfoReportsTheStampedVersion(t *testing.T) {
+	entries := testEntries()
+	exporter := NewExporter(entries, agent.NewRegistry(entries), fakeVault{}, nil,
+		WithClock(func() time.Time { return baseTime }),
+		WithVersion("v1.2.3"))
+
+	key, ok := buildInfoSeries(scrape(t, string(exporter.Gather())))
+	if !ok {
+		t.Fatalf("missing %s", metricBuildInfo)
+	}
+	if !strings.Contains(key, `version="v1.2.3"`) {
+		t.Errorf("%s = %s, want the stamped version", metricBuildInfo, key)
+	}
+	// The label sits alongside the build facts the toolchain reports.
+	if !strings.Contains(key, "go_version=") || !strings.Contains(key, "revision=") {
+		t.Errorf("%s = %s, want go_version and revision kept", metricBuildInfo, key)
+	}
+}
+
+func TestWithVersionIgnoresAnEmptyValue(t *testing.T) {
+	entries := testEntries()
+	exporter := NewExporter(entries, agent.NewRegistry(entries), fakeVault{}, nil,
+		WithClock(func() time.Time { return baseTime }),
+		WithVersion(""))
+
+	key, _ := buildInfoSeries(scrape(t, string(exporter.Gather())))
+	if !strings.Contains(key, `version="`+DefaultVersion+`"`) {
+		t.Errorf("%s = %s, want the default version kept", metricBuildInfo, key)
 	}
 }
 

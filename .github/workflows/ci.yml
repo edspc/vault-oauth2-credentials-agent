@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the previous run on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # go.mod is the single source of truth for the Go version, so CI cannot
+      # drift from what the project declares.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # go vet plus a gofmt check that fails rather than rewrites.
+      - name: Lint
+        run: make lint
+
+      # -race because the refresher, the status registry, the in-flight state
+      # store and the metric counters are all touched from several goroutines.
+      - name: Test
+        run: go test ./... -race -count=1
+
+      - name: Build
+        run: make build

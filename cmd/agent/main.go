@@ -33,12 +33,26 @@ const (
 	loginRetryGap = 2 * time.Second
 )
 
+// binaryName is how the agent identifies itself to a person running it.
+const binaryName = "vault-oauth2-agent"
+
+// version is stamped at build time with -ldflags "-X main.version=...". It
+// stays "dev" for a plain `go build`, so an unstamped binary never claims to
+// be a release.
+var version = metrics.DefaultVersion
+
 func main() {
 	configPath := flag.String("config", envOr("CONFIG_PATH", "config.yaml"),
 		"path to the configuration file")
 	logLevel := flag.String("log-level", envOr("LOG_LEVEL", "info"),
 		"log level: debug, info, warn or error")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(binaryName, version)
+		return
+	}
 
 	logger, err := newLogger(*logLevel)
 	if err != nil {
@@ -101,7 +115,8 @@ func run(configPath string, logger *slog.Logger) error {
 	var exporter http.Handler
 	if cfg.Metrics.Enabled() {
 		recorder = metrics.NewRecorder(entries)
-		exporter = metrics.NewExporter(entries, registry, vaultClient, recorder)
+		exporter = metrics.NewExporter(entries, registry, vaultClient, recorder,
+			metrics.WithVersion(version))
 		logger.Info("serving metrics", slog.String("path", cfg.Metrics.Path))
 	}
 

@@ -1,0 +1,28 @@
+# Both ecosystems have something to watch from day one: gomod covers
+# gopkg.in/yaml.v3, the single third-party dependency, and github-actions keeps
+# the versions pinned in the two workflows from quietly going stale.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    # Adding a third-party dependency is a deliberate decision here, so keep
+    # the queue small enough to actually read.
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - github-actions
+    open-pull-requests-limit: 5

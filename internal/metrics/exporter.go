@@ -33,6 +33,9 @@ const heapObjectsMetric = "/memory/classes/heap/objects:bytes"
 // ContentType is the media type of the exposition format the exporter emits.
 const ContentType = "text/plain; version=0.0.4; charset=utf-8"
 
+// DefaultVersion is reported when the binary was not stamped with a release.
+const DefaultVersion = "dev"
+
 // VaultStatus reports the state of the agent's own Vault session.
 type VaultStatus interface {
 	// Authenticated reports whether a client token is held.
@@ -48,6 +51,7 @@ type Exporter struct {
 	statuses  *agent.Registry
 	vault     VaultStatus
 	recorder  *Recorder
+	version   string
 	now       func() time.Time
 	startedAt time.Time
 }
@@ -64,6 +68,16 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
+// WithVersion sets the release the binary was built as, which is reported as a
+// label of the build info metric. It defaults to DefaultVersion.
+func WithVersion(version string) Option {
+	return func(e *Exporter) {
+		if version != "" {
+			e.version = version
+		}
+	}
+}
+
 // NewExporter builds an exporter over the agent's runtime state.
 func NewExporter(entries []agent.Entry, statuses *agent.Registry, vault VaultStatus, recorder *Recorder, opts ...Option) *Exporter {
 	e := &Exporter{
@@ -71,6 +85,7 @@ func NewExporter(entries []agent.Entry, statuses *agent.Registry, vault VaultSta
 		statuses: statuses,
 		vault:    vault,
 		recorder: recorder,
+		version:  DefaultVersion,
 		now:      time.Now,
 	}
 	for _, opt := range opts {
@@ -183,7 +198,9 @@ func (e *Exporter) writeProcess(out *writer) {
 	out.family(metricBuildInfo, "Build information of the running agent.", typeGauge)
 	goVersion, revision := buildInfo()
 	out.sample(metricBuildInfo, 1,
-		label{"go_version", goVersion}, label{"revision", revision})
+		label{"version", e.version},
+		label{"go_version", goVersion},
+		label{"revision", revision})
 
 	out.family(metricStartTime, "Unix time at which the agent started.", typeGauge)
 	out.sample(metricStartTime, timestamp(e.startedAt))
