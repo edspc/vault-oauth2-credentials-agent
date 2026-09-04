@@ -316,3 +316,69 @@ func TestDurationRejectsNonString(t *testing.T) {
 		t.Fatal("Parse() error = nil, want a duration parse error")
 	}
 }
+
+func TestMetricsDisabledByDefault(t *testing.T) {
+	cfg, err := Parse([]byte(minimalConfig))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Metrics.Enabled() {
+		t.Error("Metrics.Enabled() = true, want metrics off unless a path is configured")
+	}
+	if cfg.Metrics.Path != "" {
+		t.Errorf("Metrics.Path = %q, want empty", cfg.Metrics.Path)
+	}
+}
+
+func TestMetricsPath(t *testing.T) {
+	cfg, err := Parse([]byte("metrics:\n  path: /metrics\n" + minimalConfig))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.Metrics.Enabled() {
+		t.Error("Metrics.Enabled() = false, want true")
+	}
+	if cfg.Metrics.Path != "/metrics" {
+		t.Errorf("Metrics.Path = %q, want /metrics", cfg.Metrics.Path)
+	}
+}
+
+func TestMetricsPathValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		doc     string
+		wantMsg string
+	}{
+		{
+			name:    "relative path",
+			doc:     "metrics:\n  path: metrics\n" + minimalConfig,
+			wantMsg: `must start with '/'`,
+		},
+		{
+			name:    "unclean path",
+			doc:     "metrics:\n  path: /a/../metrics\n" + minimalConfig,
+			wantMsg: "must be a clean path",
+		},
+		{
+			name:    "reserved path",
+			doc:     "metrics:\n  path: /readyz\n" + minimalConfig,
+			wantMsg: "is reserved",
+		},
+		{
+			name:    "collides with the callback path",
+			doc:     "metrics:\n  path: /callback\n" + minimalConfig,
+			wantMsg: "collides with server.callback_path",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.doc))
+			if err == nil {
+				t.Fatalf("Parse() error = nil, want an error containing %q", tt.wantMsg)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("Parse() error = %v, want it to contain %q", err, tt.wantMsg)
+			}
+		})
+	}
+}

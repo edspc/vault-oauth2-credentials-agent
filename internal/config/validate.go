@@ -28,6 +28,9 @@ func (c *Config) validate() error {
 	if err := c.Refresh.validate(); err != nil {
 		return err
 	}
+	if err := c.Metrics.validate(c.Server.CallbackPath); err != nil {
+		return err
+	}
 	if len(c.Entries) == 0 {
 		return fmt.Errorf("entries: at least one entry is required")
 	}
@@ -72,6 +75,22 @@ func (s Server) validate() error {
 		return err
 	}
 	return requirePositive("server.shutdown_timeout", s.ShutdownTimeout)
+}
+
+func (m Metrics) validate(callbackPath string) error {
+	if m.Path == "" {
+		return nil
+	}
+	if err := validateURLPath("metrics.path", m.Path); err != nil {
+		return err
+	}
+	if slices.Contains(reservedPaths, m.Path) {
+		return fmt.Errorf("metrics.path %q is reserved by the agent", m.Path)
+	}
+	if m.Path == callbackPath {
+		return fmt.Errorf("metrics.path %q collides with server.callback_path", m.Path)
+	}
+	return nil
 }
 
 func (v Vault) validate() error {

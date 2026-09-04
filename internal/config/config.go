@@ -27,8 +27,19 @@ type Config struct {
 	Server  Server  `yaml:"server"`
 	Vault   Vault   `yaml:"vault"`
 	Refresh Refresh `yaml:"refresh"`
+	Metrics Metrics `yaml:"metrics"`
 	Entries []Entry `yaml:"entries"`
 }
+
+// Metrics configures the Prometheus exposition endpoint.
+type Metrics struct {
+	// Path is where the metrics are served, for example "/metrics". When it
+	// is empty the endpoint is not registered and nothing is measured.
+	Path string `yaml:"path"`
+}
+
+// Enabled reports whether metrics should be collected and exposed.
+func (m Metrics) Enabled() bool { return m.Path != "" }
 
 // Server configures the HTTP listener used for the authorization flow.
 type Server struct {
