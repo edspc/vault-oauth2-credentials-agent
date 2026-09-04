@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/agent"
+	"github.com/edspc/vault-oauth2-credentials-agent/internal/metrics"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/oauth2"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/tokenstore"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/vault"
@@ -70,8 +72,23 @@ type harness struct {
 	store     *tokenstore.Store
 	registry  *agent.Registry
 	refresher *Refresher
+	recorder  *metrics.Recorder
+	exporter  *metrics.Exporter
 	now       time.Time
 	calls     int
+}
+
+// counter reads one refresh counter out of the exposition document.
+func (h *harness) counter(result string) string {
+	h.t.Helper()
+	prefix := `oauth2_agent_refresh_attempts_total{entry="example",result="` + result + `"} `
+	for _, line := range strings.Split(string(h.exporter.Gather()), "\n") {
+		if value, ok := strings.CutPrefix(line, prefix); ok {
+			return value
+		}
+	}
+	h.t.Fatalf("no refresh counter for result %q", result)
+	return ""
 }
 
 func newHarness(t *testing.T, tokenHandler http.HandlerFunc) *harness {
@@ -100,13 +117,17 @@ func newHarness(t *testing.T, tokenHandler http.HandlerFunc) *harness {
 	}
 	entries := []agent.Entry{entry}
 	h.registry = agent.NewRegistry(entries)
+	h.recorder = metrics.NewRecorder(entries)
+	h.exporter = metrics.NewExporter(entries, h.registry, nil, h.recorder,
+		metrics.WithClock(clock))
 	h.refresher = New(entries, h.store, h.registry, Config{
 		Interval:     time.Minute,
 		BeforeExpiry: 10 * time.Minute,
 		MaxBackoff:   30 * time.Minute,
 	},
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
-		WithClock(clock))
+		WithClock(clock),
+		WithMetrics(h.recorder))
 	return h
 }
 
@@ -311,6 +332,9 @@ func TestReadErrorIsReported(t *testing.T) {
 	if got := h.state(); got != agent.StateRefreshFailed {
 		t.Errorf("state = %q, want %q", got, agent.StateRefreshFailed)
 	}
+	if got := h.counter(metrics.ResultFailure); got != "1" {
+		t.Errorf("failure counter = %s, want the read failure to be counted", got)
+	}
 }
 
 func TestRunStopsOnContextCancel(t *testing.T) {
@@ -337,5 +361,73 @@ func TestHashTokenIsStableAndDistinct(t *testing.T) {
 	}
 	if hashToken("a") == hashToken("b") {
 		t.Error("hashToken() collides for different inputs")
+	}
+}
+
+func TestRefreshOutcomesAreCounted(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.seed("rt", baseTime.Add(5*time.Minute))
+
+	h.refresher.RunOnce(context.Background())
+
+	if got := h.counter(metrics.ResultSuccess); got != "1" {
+		t.Errorf("success counter = %s, want 1", got)
+	}
+	if got := h.counter(metrics.ResultFailure); got != "0" {
+		t.Errorf("failure counter = %s, want 0", got)
+	}
+}
+
+func TestSkippedCredentialIsNotCounted(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.seed("rt", baseTime.Add(time.Hour))
+
+	h.refresher.RunOnce(context.Background())
+
+	for _, result := range []string{metrics.ResultSuccess, metrics.ResultFailure, metrics.ResultNeedsReauth} {
+		if got := h.counter(result); got != "0" {
+			t.Errorf("%s counter = %s, want 0 when no refresh was due", result, got)
+		}
+	}
+}
+
+func TestInvalidGrantIsCountedAsNeedsReauth(t *testing.T) {
+	h := newHarness(t, failWith(http.StatusBadRequest, `{"error":"invalid_grant"}`))
+	h.seed("rt", baseTime.Add(time.Minute))
+
+	h.refresher.RunOnce(context.Background())
+
+	if got := h.counter(metrics.ResultNeedsReauth); got != "1" {
+		t.Errorf("needs_reauth counter = %s, want 1", got)
+	}
+	if got := h.counter(metrics.ResultFailure); got != "0" {
+		t.Errorf("failure counter = %s, want 0; invalid_grant is not a transient failure", got)
+	}
+}
+
+func TestTransientFailureIsCounted(t *testing.T) {
+	h := newHarness(t, failWith(http.StatusInternalServerError, `{}`))
+	h.seed("rt", baseTime.Add(time.Minute))
+
+	h.refresher.RunOnce(context.Background())
+
+	if got := h.counter(metrics.ResultFailure); got != "1" {
+		t.Errorf("failure counter = %s, want 1", got)
+	}
+}
+
+func TestRefresherWithoutMetricsRecorder(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	// Metrics disabled: the refresher holds a nil recorder.
+	WithMetrics(nil)(h.refresher)
+	h.seed("rt", baseTime.Add(5*time.Minute))
+
+	h.refresher.RunOnce(context.Background())
+
+	if h.calls != 1 {
+		t.Errorf("provider calls = %d, want the refresh to happen anyway", h.calls)
+	}
+	if got := h.state(); got != agent.StateAuthorized {
+		t.Errorf("state = %q, want %q", got, agent.StateAuthorized)
 	}
 }

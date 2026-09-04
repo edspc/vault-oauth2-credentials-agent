@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/agent"
+	"github.com/edspc/vault-oauth2-credentials-agent/internal/metrics"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/oauth2"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/tokenstore"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/vault"
@@ -64,9 +65,21 @@ type harness struct {
 	server   *Server
 	handler  http.Handler
 	backend  *fakeVault
+	entries  []agent.Entry
 	registry *agent.Registry
 	provider *httptest.Server
 	ready    bool
+}
+
+// enableMetrics turns on the exposition endpoint and returns the recorder the
+// handlers write to.
+func (h *harness) enableMetrics(path string) *metrics.Recorder {
+	recorder := metrics.NewRecorder(h.entries)
+	exporter := metrics.NewExporter(h.entries, h.registry, nil, recorder)
+	h.server.cfg.MetricsPath = path
+	WithMetrics(recorder, exporter)(h.server)
+	h.handler = h.server.Handler()
+	return recorder
 }
 
 func newHarness(t *testing.T, tokenHandler http.HandlerFunc, opts ...Option) *harness {
@@ -92,6 +105,7 @@ func newHarness(t *testing.T, tokenHandler http.HandlerFunc, opts ...Option) *ha
 			Scopes:       []string{"repo"},
 		}, oauth2.WithClock(clock)),
 	}}
+	h.entries = entries
 	h.registry = agent.NewRegistry(entries)
 
 	options := []Option{
@@ -396,10 +410,11 @@ func TestUnknownPathIsNotFound(t *testing.T) {
 
 func TestNoResponseIsHTML(t *testing.T) {
 	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/metrics")
 	state := h.startFlow(t)
 
 	targets := []string{
-		"/", "/nope", PathHealthz, PathReadyz,
+		"/", "/nope", PathHealthz, PathReadyz, "/metrics",
 		PathAuthorize, PathAuthorize + "?entry=missing", PathAuthorize + "?entry=example",
 		"/callback?state=forged",
 		"/callback?code=c&state=" + url.QueryEscape(state),
@@ -452,8 +467,91 @@ func TestCustomCallbackPath(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpointIsNotRegisteredByDefault(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	if rec := h.get(t, "/metrics"); rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 while no metrics path is configured", rec.Code)
+	}
+}
+
+func TestMetricsEndpointServesExposition(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/metrics")
+
+	rec := h.get(t, "/metrics")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != metrics.ContentType {
+		t.Errorf("Content-Type = %q, want %q", got, metrics.ContentType)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `oauth2_agent_credential_state{entry="example",state="unknown"} 1`) {
+		t.Errorf("exposition does not report the entry state:\n%s", body)
+	}
+}
+
+func TestMetricsEndpointOnACustomPath(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/internal/metrics")
+
+	if rec := h.get(t, "/internal/metrics"); rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 on the configured path", rec.Code)
+	}
+	if rec := h.get(t, "/metrics"); rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 on the default path", rec.Code)
+	}
+}
+
+func TestSuccessfulAuthorizationIsCounted(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/metrics")
+
+	state := h.startFlow(t)
+	if rec := h.get(t, "/callback?code=c&state="+url.QueryEscape(state)); rec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want 200", rec.Code)
+	}
+
+	body := h.get(t, "/metrics").Body.String()
+	if !strings.Contains(body, `oauth2_agent_authorizations_total{entry="example",result="success"} 1`) {
+		t.Errorf("successful authorization was not counted:\n%s", body)
+	}
+	if !strings.Contains(body, `oauth2_agent_credential_state{entry="example",state="authorized"} 1`) {
+		t.Errorf("state was not reported as authorized:\n%s", body)
+	}
+	if !strings.Contains(body, "oauth2_agent_credential_expires_at_timestamp_seconds{entry=\"example\"}") {
+		t.Errorf("expiry timestamp is missing:\n%s", body)
+	}
+}
+
+func TestRefusedAuthorizationIsCounted(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/metrics")
+
+	state := h.startFlow(t)
+	if rec := h.get(t, "/callback?error=access_denied&state="+url.QueryEscape(state)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("callback status = %d, want 400", rec.Code)
+	}
+
+	body := h.get(t, "/metrics").Body.String()
+	if !strings.Contains(body, `oauth2_agent_authorizations_total{entry="example",result="failure"} 1`) {
+		t.Errorf("refused authorization was not counted:\n%s", body)
+	}
+}
+
+func TestAuthorizationIsNotCountedWithoutMetrics(t *testing.T) {
+	h := newHarness(t, respondWithToken)
+	state := h.startFlow(t)
+
+	// The handlers hold a nil recorder here; the flow must still complete.
+	if rec := h.get(t, "/callback?code=c&state="+url.QueryEscape(state)); rec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want 200 with metrics disabled", rec.Code)
+	}
+}
+
 func TestFailedReauthorizationKeepsTheReportedState(t *testing.T) {
 	h := newHarness(t, respondWithToken)
+	h.enableMetrics("/metrics")
 
 	// A valid credential is already stored and reported as such.
 	state := h.startFlow(t)
@@ -472,5 +570,9 @@ func TestFailedReauthorizationKeepsTheReportedState(t *testing.T) {
 	if got := h.registry.Get("example").State; got != agent.StateAuthorized {
 		t.Errorf("state = %q, want %q; a refused re-authorization must not downgrade it",
 			got, agent.StateAuthorized)
+	}
+	body := h.get(t, "/metrics").Body.String()
+	if !strings.Contains(body, `oauth2_agent_authorizations_total{entry="example",result="failure"} 1`) {
+		t.Error("the refused authorization was not counted")
 	}
 }

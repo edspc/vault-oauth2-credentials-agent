@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/agent"
+	"github.com/edspc/vault-oauth2-credentials-agent/internal/metrics"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/oauth2"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/tokenstore"
 )
@@ -34,6 +35,8 @@ type Refresher struct {
 	cfg      Config
 	logger   *slog.Logger
 	now      func() time.Time
+	// recorder is nil when metrics are disabled; its methods are no-ops then.
+	recorder *metrics.Recorder
 
 	// state is only touched from the single goroutine running the loop.
 	state map[string]*entryState
@@ -68,6 +71,11 @@ func WithClock(now func() time.Time) Option {
 			r.now = now
 		}
 	}
+}
+
+// WithMetrics records refresh outcomes into the given recorder.
+func WithMetrics(recorder *metrics.Recorder) Option {
+	return func(r *Refresher) { r.recorder = recorder }
 }
 
 // New builds a Refresher for the given entries.
@@ -145,6 +153,7 @@ func (r *Refresher) refresh(ctx context.Context, entry agent.Entry, state *entry
 		return nil
 	case err != nil:
 		r.registry.SetState(entry.ID, agent.StateRefreshFailed)
+		r.recorder.RefreshAttempt(entry.ID, metrics.ResultFailure)
 		r.backoff(entry.ID, state, log, err)
 		return err
 	}
@@ -185,11 +194,13 @@ func (r *Refresher) refresh(ctx context.Context, entry agent.Entry, state *entry
 			state.deadRefreshHash = hash
 			state.reset()
 			r.registry.SetState(entry.ID, agent.StateNeedsReauth)
+			r.recorder.RefreshAttempt(entry.ID, metrics.ResultNeedsReauth)
 			log.Error("refresh token was rejected, re-authorization required",
 				slog.String("error", err.Error()))
 			return nil
 		}
 		r.registry.SetState(entry.ID, agent.StateRefreshFailed)
+		r.recorder.RefreshAttempt(entry.ID, metrics.ResultFailure)
 		r.backoff(entry.ID, state, log, err)
 		return err
 	}
@@ -197,11 +208,13 @@ func (r *Refresher) refresh(ctx context.Context, entry agent.Entry, state *entry
 	saved, err := r.store.SaveRefreshed(ctx, entry.Location, entry.ID, token)
 	if err != nil {
 		r.registry.SetState(entry.ID, agent.StateRefreshFailed)
+		r.recorder.RefreshAttempt(entry.ID, metrics.ResultFailure)
 		r.backoff(entry.ID, state, log, err)
 		return err
 	}
 
 	r.registry.SetAuthorized(entry.ID, saved.Expiry, saved.UpdatedAt)
+	r.recorder.RefreshAttempt(entry.ID, metrics.ResultSuccess)
 	state.reset()
 	log.Info("credential refreshed", slog.Time("expiry", saved.Expiry))
 	return nil

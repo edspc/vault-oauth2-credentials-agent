@@ -1,6 +1,7 @@
 // Package httpapi serves the agent's HTTP surface: the endpoint that starts an
-// authorization, the OAuth2 redirect that completes it and the health probes.
-// Every response is plain text; the agent has no user interface.
+// authorization, the OAuth2 redirect that completes it, the metrics endpoint
+// and the health probes. Every response is plain text; the agent has no user
+// interface.
 package httpapi
 
 import (
@@ -14,12 +15,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/agent"
+	"github.com/edspc/vault-oauth2-credentials-agent/internal/metrics"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/oauth2"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/tokenstore"
 )
 
-// Paths served by the agent besides the configurable callback path. PathRoot
-// is not served; it only anchors the catch-all route.
+// Paths served by the agent besides the configurable callback and metrics
+// paths. PathRoot is not served; it only anchors the catch-all route.
 const (
 	PathRoot      = "/"
 	PathAuthorize = "/authorize"
@@ -37,6 +39,9 @@ type Config struct {
 	CallbackPath string
 	// StateTTL bounds how long a user has to complete an authorization.
 	StateTTL time.Duration
+	// MetricsPath serves the Prometheus endpoint. The route is only
+	// registered when a handler is supplied with WithMetricsHandler too.
+	MetricsPath string
 }
 
 // Server implements the authorization endpoints.
@@ -50,6 +55,9 @@ type Server struct {
 	logger   *slog.Logger
 	now      func() time.Time
 	ready    func() bool
+	// recorder is nil when metrics are disabled; its methods are no-ops then.
+	recorder *metrics.Recorder
+	metrics  http.Handler
 }
 
 // Option customises a Server.
@@ -80,6 +88,16 @@ func WithReadyCheck(ready func() bool) Option {
 		if ready != nil {
 			s.ready = ready
 		}
+	}
+}
+
+// WithMetrics records authorization outcomes and serves the exposition
+// handler at Config.MetricsPath. Passing a nil handler leaves the endpoint
+// unregistered and turns the recording calls into no-ops.
+func WithMetrics(recorder *metrics.Recorder, handler http.Handler) Option {
+	return func(s *Server) {
+		s.recorder = recorder
+		s.metrics = handler
 	}
 }
 
@@ -118,6 +136,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+PathReadyz, s.handleReadyz)
 	mux.HandleFunc("GET "+PathAuthorize, s.handleAuthorize)
 	mux.HandleFunc("GET "+s.cfg.CallbackPath, s.handleCallback)
+	if s.cfg.MetricsPath != "" && s.metrics != nil {
+		mux.Handle("GET "+s.cfg.MetricsPath, s.metrics)
+	}
 	mux.HandleFunc("GET "+PathRoot, s.handleNotFound)
 	return securityHeaders(mux)
 }
@@ -216,8 +237,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", providerErr),
 			slog.String("description", description))
 		// The stored credential is untouched by a refused authorization, so
-		// the reported state is not downgraded: it describes what is in
+		// the reported state must not be downgraded: it describes what is in
 		// Vault, not how the last attempt went.
+		s.recorder.Authorization(entry.ID, metrics.ResultFailure)
 		s.respond(w, http.StatusBadRequest, entry.ID,
 			"the provider refused the authorization: "+strings.TrimSpace(providerErr+" "+description))
 		return
@@ -249,6 +271,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		// As above: a failed exchange leaves whatever is stored in place.
+		s.recorder.Authorization(entry.ID, metrics.ResultFailure)
 		s.logger.Error("authorization failed",
 			slog.String("entry", entry.ID),
 			slog.String("error", err.Error()))
@@ -258,6 +281,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.registry.SetAuthorized(entry.ID, record.Expiry, record.UpdatedAt)
+	s.recorder.Authorization(entry.ID, metrics.ResultSuccess)
 	s.logger.Info("credential authorized and stored",
 		slog.String("entry", entry.ID),
 		slog.String("vault_path", entry.Location.String()),
