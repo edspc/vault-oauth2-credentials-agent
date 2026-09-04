@@ -30,6 +30,11 @@ vault:
       role: oauth2-agent
       jwt_path: /var/run/secrets/kubernetes.io/serviceaccount/token
 
+metrics:
+  # Prometheus exposition endpoint, served on the same listener as the rest of
+  # the API. Leave it out entirely to collect and expose nothing at all.
+  path: "/metrics"
+
 refresh:
   # How often stored credentials are inspected.
   interval: 1m

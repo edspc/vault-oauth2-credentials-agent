@@ -20,6 +20,7 @@ import (
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/agent"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/config"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/httpapi"
+	"github.com/edspc/vault-oauth2-credentials-agent/internal/metrics"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/refresher"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/tokenstore"
 	"github.com/edspc/vault-oauth2-credentials-agent/internal/vault"
@@ -94,17 +95,29 @@ func run(configPath string, logger *slog.Logger) error {
 	registry := agent.NewRegistry(entries)
 	store := tokenstore.New(vaultClient)
 
+	// With no metrics path configured, nothing is measured and no endpoint is
+	// registered: a nil recorder makes every recording call a no-op.
+	var recorder *metrics.Recorder
+	var exporter http.Handler
+	if cfg.Metrics.Enabled() {
+		recorder = metrics.NewRecorder(entries)
+		exporter = metrics.NewExporter(entries, registry, vaultClient, recorder)
+		logger.Info("serving metrics", slog.String("path", cfg.Metrics.Path))
+	}
+
 	refresh := refresher.New(entries, store, registry, refresher.Config{
 		Interval:     cfg.Refresh.Interval.Duration(),
 		BeforeExpiry: cfg.Refresh.BeforeExpiry.Duration(),
 		MaxBackoff:   cfg.Refresh.MaxBackoff.Duration(),
-	}, refresher.WithLogger(logger))
+	}, refresher.WithLogger(logger), refresher.WithMetrics(recorder))
 
 	api := httpapi.New(entries, store, registry, httpapi.Config{
 		CallbackPath: cfg.Server.CallbackPath,
+		MetricsPath:  cfg.Metrics.Path,
 	},
 		httpapi.WithLogger(logger),
-		httpapi.WithReadyCheck(vaultClient.TokenValid))
+		httpapi.WithReadyCheck(vaultClient.TokenValid),
+		httpapi.WithMetrics(recorder, exporter))
 
 	server := &http.Server{
 		Addr:              cfg.Server.Listen,
